@@ -6,8 +6,8 @@ url = "http://127.0.0.1:11434/api/chat"
 
 # Define the payload (your input prompt)
 payload = {
-    "model": "llama2",  # Replace with the model name you're using
-    "messages": [{"role": "user", "content": "What is Python?"}]
+    "model": "pokemon-assistant",  # Replace with the model name you're using
+    "messages": [{"role": "user", "content": "Build me a team around Charizard"}]
 }
 
 # Send the HTTP POST request with streaming enabled
