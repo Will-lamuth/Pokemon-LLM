@@ -1,102 +1,120 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
+import requests
+import json
 import pandas as pd
-from datasets import Dataset
-from transformers import Trainer, TrainingArguments
-from accelerate import Accelerator
+import torch
+from sklearn.metrics import precision_score, f1_score
+import matplotlib
+matplotlib.use('Agg')  # Use Agg backend for non-interactive environments (SSH)
+import matplotlib.pyplot as plt
 
-# Step 1: Load the Pokémon Data
-pokemon_data = pd.read_csv('Pokemon.csv')
+# Set up the base URL for the local Ollama API
+url = "http://127.0.0.1:11434/api/chat"
 
-# Convert the Pokémon data into text descriptions
-pokemon_texts = []
-for index, row in pokemon_data.iterrows():
-    # Format the Pokémon data into a text string
-    pokemon_description = f"{row['Name']} is a {row['Type 1']} and {row['Type 2'] if pd.notna(row['Type 2']) else 'no'}-type Pokémon with a total stat of {row['Total']}. It has {row['HP']} HP, {row['Attack']} Attack, {row['Defense']} Defense, {row['Sp. Atk']} Special Attack, {row['Sp. Def']} Special Defense, and {row['Speed']} Speed. It is from Generation {row['Generation']} and is {'a Legendary Pokémon' if row['Legendary'] else 'not a Legendary Pokémon'}."
-    pokemon_texts.append(pokemon_description)
+# Load the Pokémon data from the CSV file
+pokemon_df = pd.read_csv('Pokemon.csv')
 
-# Step 2: Tokenize the Data
-model_name = "meta-llama/Llama-2-7b"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+# Clean up the data: Strip spaces from column names and data
+pokemon_df.columns = pokemon_df.columns.str.strip()  # Strip column names of extra spaces
+pokemon_df['Name'] = pokemon_df['Name'].str.strip()  # Strip Pokémon names of extra spaces
+pokemon_df['Type 1'] = pokemon_df['Type 1'].str.strip().str.lower()  # Normalize Type 1
+pokemon_df['Type 2'] = pokemon_df['Type 2'].fillna('').str.strip().str.lower()  # Normalize Type 2 and handle NaN
 
-# Check if the tokenizer has a pad_token, if not, set it to eos_token
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
+# Function to send requests and handle streaming responses
+def get_stream_response(payload):
+    try:
+        # Send the HTTP POST request with streaming enabled
+        response = requests.post(url, json=payload, stream=True)
 
-# Tokenize the Pokémon descriptions
-inputs = tokenizer(pokemon_texts, return_tensors="pt", padding=True, truncation=True)
+        # Check the response status
+        if response.status_code == 200:
+            print("Streaming response from Ollama:")
+            for line in response.iter_lines(decode_unicode=True):
+                if line:  # Ignore empty lines
+                    try:
+                        # Parse each line as a JSON object
+                        json_data = json.loads(line)
+                        # Extract and print the assistant's message content
+                        if "message" in json_data and "content" in json_data["message"]:
+                            print(json_data["message"]["content"], end="")
+                    except json.JSONDecodeError:
+                        print(f"\nFailed to parse line: {line}")
+            print()  # Ensure the final output ends with a newline
+        else:
+            print(f"Error: {response.status_code}")
+            print(response.text)
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed: {e}")
 
-# Step 3: Load the Model with Mixed Precision (FP16)
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    device_map="auto",  # Automatically selects CPU or GPU/MPS on your system
-    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32  # Use FP16 for GPUs if available
-)
+# Function to build a team based on different Pokémon-related requests
+def build_pokemon_team(query):
+    payload = {
+        "model": "llama3-8b-q4",  # Replace with the model name you're using
+        "messages": [{"role": "user", "content": query}]
+    }
+    get_stream_response(payload)
 
-# Step 4: Use Accelerator to handle the device automatically
-accelerator = Accelerator()
+# Function to process the Pokémon data and build a team
+def process_pokemon_data():
+    # Show the Pokémon data to the user and prompt for a Pokémon to base the team around
+    print(pokemon_df[['Name']])  # Display the names of available Pokémon
+    selected_pokemon_name = input("Which Pokémon would you like to base your team around? ")
 
-# Prepare the model and inputs using Accelerator
-model, inputs = accelerator.prepare(model, inputs)
+    # Find the selected Pokémon in the data
+    selected_pokemon = pokemon_df[pokemon_df['Name'].str.lower() == selected_pokemon_name.lower()]
 
-# Step 5: Run Inference to Generate Output
-with torch.no_grad():
-    outputs = model.generate(
-        **inputs, 
-        max_new_tokens=100,  # Adjust the number of tokens to generate
-        do_sample=True,  # If you want more randomness in the generated text
-        top_k=50,  # Controls randomness (higher values = more randomness)
-        top_p=0.95  # Nucleus sampling for randomness
-    )
+    if selected_pokemon.empty:
+        print(f"Sorry, {selected_pokemon_name} is not in the data.")
+        return
 
-# Decode the output to get the response as text
-response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    # Formulate the query to build a team based on the selected Pokémon, asking for Smogon-based recommendations
+    team_query = f"""
+    Build me a competitive Smogon-style team around {selected_pokemon_name}. 
+    Please suggest the best EV spreads and movesets for each Pokémon, based on the best competitive teams used in Smogon for {selected_pokemon_name}.
+    Make sure the team includes **6 Pokémon** to form a complete team, covering all necessary roles like offensive, defensive, and special attackers, and includes a balance of types (such as Steel/Psychic for Metagross).
+    """
+    # Build the team and get response
+    build_pokemon_team(team_query)
 
-# Print the generated text
-print(response)
+    # Example: Mock predictions and true labels for evaluation
+    true_labels = [1, 0, 1, 0, 1, 1]  # Example true labels (ground truth)
+    predicted_labels = [1, 0, 1, 0, 0, 1]  # Example predicted labels (from the model)
 
-# Optional: Step 6 - Fine-Tuning the Model (this step requires significant resources)
-# Convert your dataset into a HuggingFace Dataset
-pokemon_df = pd.DataFrame(pokemon_texts, columns=["text"])
-pokemon_dataset = Dataset.from_pandas(pokemon_df)
+    # Calculate Precision and F1 Score
+    precision = precision_score(true_labels, predicted_labels, average='weighted')  # 'micro', 'macro', or 'weighted'
+    f1 = f1_score(true_labels, predicted_labels, average='weighted')
 
-# Set up the training arguments
-training_args = TrainingArguments(
-    output_dir="./results",          # output directory
-    evaluation_strategy="epoch",     # evaluate after each epoch
-    learning_rate=1e-5,              # learning rate
-    per_device_train_batch_size=4,   # batch size per device
-    num_train_epochs=3,              # number of training epochs
-)
+    # Create a table for Precision and F1 Score
+    metrics_data = {
+        'Metric': ['Precision', 'F1 Score'],
+        'Score': [precision, f1]
+    }
 
-# Initialize the trainer
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=pokemon_dataset,
-)
+    # Create a DataFrame for metrics
+    metrics_df = pd.DataFrame(metrics_data)
 
-# Fine-tune the model (this step requires a lot of resources)
-trainer.train()
+    # Display the table
+    print(metrics_df)
 
-# Step 7: Saving the Model (Optional)
-# Save the fine-tuned model for future use
-model.save_pretrained("./pokemon_model")
-tokenizer.save_pretrained("./pokemon_model")
+    # Visualize Precision and F1 Score using a bar chart
+    metrics = ['Precision', 'F1 Score']
+    scores = [precision, f1]
 
-# Step 8: Testing the Trained Model
-# Load the fine-tuned model
-model = AutoModelForCausalLM.from_pretrained("./pokemon_model")
-tokenizer = AutoTokenizer.from_pretrained("./pokemon_model")
+    # Plotting the bar chart
+    plt.bar(metrics, scores, color=['blue', 'orange'])
+    plt.xlabel('Metrics')
+    plt.ylabel('Score')
+    plt.title('Model Performance')
+    plt.ylim(0, 1)  # Score range from 0 to 1
 
-# Generate response for a custom prompt
-prompt = "Suggest a balanced Gen 9 OU team that can handle Iron Valiant and Dragapult."
-inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    # Save the chart to a file (e.g., PNG)
+    plt.savefig('performance_chart.png')
 
-# Generate the output
-with torch.no_grad():
-    outputs = model.generate(**inputs, max_new_tokens=200)
+    # Optionally, display the chart (if plt.show() works in your environment)
+    # plt.show()
 
-# Decode and print the result
-response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-print(response)
+    print("Performance chart saved as 'performance_chart.png'.")
+
+# Example usage
+if __name__ == "__main__":
+    # Process the CSV file to extract Pokémon data and build a team based on user input
+    process_pokemon_data()

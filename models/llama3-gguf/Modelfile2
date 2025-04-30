@@ -1,6 +1,5 @@
-FROM llama3
+FROM llama-3.1-8b-instruct-q4_k_m.gguf
 
-WEIGHTS ./models/llama3-gguf/llama-3.1-8b-instruct-q4_k_m.gguf
 
 # set the system message
 SYSTEM """
