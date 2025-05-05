@@ -1,4 +1,7 @@
+
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+# script to test finetuned TinyLlama model without merging with base model
+
 from peft import PeftModel
 import torch
 

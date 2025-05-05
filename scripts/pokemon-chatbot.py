@@ -3,7 +3,7 @@ import json
 
 # Define base URL and model
 url = "http://127.0.0.1:11434/api/chat"
-model_name = "pokemon-assistant"  # Change to your installed model
+model_name = "pokemon-assistant-v2"  # Change to your installed model
 
 # Start conversation history
 messages = []

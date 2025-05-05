@@ -1,3 +1,5 @@
+# script to merge LoRA finetuned model with base model
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel

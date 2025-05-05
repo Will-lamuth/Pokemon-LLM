@@ -10,6 +10,7 @@ tinyllama-pokemon-merged/
 *.ckpt
 *.tar
 *.h5
+llama.cpp/
 
 # Python cache
 __pycache__/

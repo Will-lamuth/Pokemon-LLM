@@ -1,3 +1,6 @@
+# This is a script to (test)finetune TinyLLama on a basic pokemon .jsonl dataset with LoRA
+# outputs: ./tinyllama-pokemon-lora
+
 from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, DataCollatorForLanguageModeling
 from datasets import load_dataset
 from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
