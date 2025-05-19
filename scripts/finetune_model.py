@@ -1,70 +1,123 @@
-# This is a script to (test)finetune TinyLLama on a basic pokemon .jsonl dataset with LoRA
-# outputs: ./tinyllama-pokemon-lora
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, DataCollatorForLanguageModeling
+from unsloth import FastLanguageModel
+from transformers import TrainingArguments, Trainer, DataCollatorForLanguageModeling
 from datasets import load_dataset
-from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
 import torch
 
-# ---- Load Model ----
-model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+# --- Config ---
+model_name = "unsloth/llama-2-7b-bnb-4bit"  # Public Unsloth-compatible model
+data_path = "../scripts/pokemon_learnsets_chat_format.jsonl"
+output_dir = "unsloth-llama3-pokemon"
+max_seq_length = 512
 
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForCausalLM.from_pretrained(
-    model_id,
+# --- Load model and tokenizer ---
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name=model_name,
+    max_seq_length=max_seq_length,
+    dtype=torch.float16,
     load_in_4bit=True,
-    device_map="auto"
 )
 
-# ---- Prepare for LoRA Training ----
-model = prepare_model_for_kbit_training(model)
+# --- Add special tokens BEFORE training ---
+special_tokens = {
+    "eos_token": "<|eot_id|>",
+    "pad_token": "<|eot_id|>",
+    "additional_special_tokens": [
+        "<|begin_of_text|>",
+        "<|start_header_id|>",
+        "<|end_header_id|>",
+        "<|eot_id|>"
+    ]
+}
+added = tokenizer.add_special_tokens(special_tokens)
+if added > 0:
+    print(f"🔧 Added {added} special tokens to tokenizer.")
+    model.resize_token_embeddings(len(tokenizer))
 
-lora_config = LoraConfig(
-    r=8,
+# --- Apply LoRA ---
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,
     lora_alpha=32,
-    target_modules=["q_proj", "v_proj"],
     lora_dropout=0.05,
     bias="none",
-    task_type="CAUSAL_LM"
+    use_gradient_checkpointing="unsloth",
+    target_modules=[
+        "q_proj", "v_proj", "k_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+        "embed_tokens", "lm_head"
+    ]
 )
 
-model = get_peft_model(model, lora_config)
+# --- Load and process dataset ---
+dataset = load_dataset("json", data_files=data_path)["train"]
 
-# ---- Load Dataset ----
-data = load_dataset("json", data_files="scripts/pokemon_finetune_full.jsonl")
-
-# Format for instruction tuning
 def format_prompt(example):
+    try:
+        user_message = next(m["content"] for m in example["messages"] if m["role"] == "user")
+        assistant_message = next(m["content"] for m in example["messages"] if m["role"] == "assistant")
+    except Exception as e:
+        print(f"⚠️ Skipping malformed example: {e}")
+        return {"text": ""}
+
     return {
-        "text": f"<|user|>\n{example['instruction']}\n<|assistant|>\n{example['output']}"
+        "text": f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n{user_message}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n{assistant_message}<|eot_id|>"
     }
 
-tokenized = data.map(format_prompt)
-tokenized = tokenized.map(lambda x: tokenizer(x["text"], truncation=True, padding="max_length", max_length=512), batched=True)
 
-# ---- Training Arguments ----
+
+dataset = dataset.map(format_prompt)
+
+# --- Tokenize dataset ---
+def tokenize_fn(examples):
+    return tokenizer(
+        examples["text"],
+        truncation=True,
+        padding="max_length",
+        max_length=max_seq_length,
+    )
+
+tokenized = dataset.map(tokenize_fn, batched=True)
+
+# --- Training args ---
 training_args = TrainingArguments(
-    output_dir="./tinyllama-pokemon-finetune",
-    per_device_train_batch_size=2,
-    gradient_accumulation_steps=4,
-    num_train_epochs=3,
+    output_dir=output_dir,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
+    num_train_epochs=5,  # More epochs for small dataset
     learning_rate=2e-4,
-    save_strategy="epoch",
-    logging_steps=10,
     fp16=True,
+    gradient_checkpointing=True,
+    logging_steps=5,
+    save_strategy="epoch",
     report_to="none"
 )
 
-# ---- Trainer ----
+# --- Trainer ---
 trainer = Trainer(
     model=model,
     args=training_args,
-    train_dataset=tokenized["train"],
+    train_dataset=tokenized,
+    tokenizer=tokenizer,
     data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False)
 )
 
+# --- Train ---
 trainer.train()
 
-# ---- Save LoRA Model ----
-model.save_pretrained("tinyllama-pokemon-lora")
-tokenizer.save_pretrained("tinyllama-pokemon-lora")
+# --- Save LoRA adapter only ---
+model.save_pretrained(f"{output_dir}/lora")
+tokenizer.save_pretrained(f"{output_dir}/lora")
+
+# --- Merge LoRA adapter into base model ---
+print("🔄 Merging LoRA adapter into base model...")
+model = model.merge_and_unload()
+
+# --- Save full merged model ---
+merged_output_dir = f"{output_dir}/merged"
+model.save_pretrained(merged_output_dir)
+tokenizer.save_pretrained(merged_output_dir)
+
+print(f"✅ Merged model saved to: {merged_output_dir}")
